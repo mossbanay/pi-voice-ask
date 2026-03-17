@@ -5,7 +5,7 @@
 ## Install
 
 ```bash
-pi install git:git@github.com/mossbanay/pi-voice-ask
+pi install git:github.com/mossbanay/pi-voice-ask
 ```
 
 ## What is this?
