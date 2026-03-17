@@ -15,7 +15,11 @@ This is a minimal extension for [Pi](https://pi.dev/) which adds support for the
 Here's the prompt I used to build it:
 
 ```text
-I want to write a new plugin for Pi which allows me to speak to it. There should be a tool that the agent is able to call to ask me a question. When it calls that tool, it should run text-to-speech to convert the question into audio, play it and then listen to my response and wait for a keyword (e.g. send reply) to indicate that I'm finished and send it back to the agent.
+I want to write a new plugin for Pi which allows me to speak to it.
+There should be a tool that the agent is able to call to ask me a question.
+When it calls that tool, it should run text-to-speech to convert the question
+into audio, play it and then listen to my response and wait for a keyword
+(e.g. send reply) to indicate that I'm finished and send it back to the agent.
 ```
 
 I have not reviewed the code that was produced, but I have happily used it to code while making pizza dough.
