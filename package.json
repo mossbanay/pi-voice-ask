@@ -1,0 +1,6 @@
+{
+    "name": "pi-voice-ask",
+    "pi": {
+        "extensions": ["voice.ts"]
+    }
+}
