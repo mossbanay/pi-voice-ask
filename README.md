@@ -1,6 +1,6 @@
 # `pi-voice-ask`
 
-![pi-voice-ask image](./image.jpg)
+<img width="1408" height="768" alt="image" src="https://github.com/user-attachments/assets/6805597b-4a5c-4ab9-9388-98123034c9d7" />
 
 ## Install
 
