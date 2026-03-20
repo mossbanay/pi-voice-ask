@@ -30,6 +30,9 @@ import { Key, matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { type ChildProcess, execSync, spawn } from "node:child_process";
 import WsWebSocket from "ws";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 
 const TRIGGER_PHRASE = "send reply";
 const AUDIO_CHUNK_SIZE = 4096; // bytes per WebSocket audio message
@@ -68,13 +71,58 @@ const VoiceAskParams = Type.Object({
 	),
 });
 
+// Config file path - persists to ~/.pi-voice-config.json
+const CONFIG_PATH = path.join(os.homedir(), ".pi-voice-config.json");
+
 // Runtime config — overrides environment variables when set
-const runtimeConfig: {
+let runtimeConfig: {
 	protocol?: Protocol;
 	url?: string;
 	model?: string;
 	apiKey?: string;
 } = {};
+
+/** Load saved config from JSON file */
+function loadConfig(): void {
+	try {
+		if (fs.existsSync(CONFIG_PATH)) {
+			const data = fs.readFileSync(CONFIG_PATH, "utf-8");
+			const config = JSON.parse(data);
+			runtimeConfig = {
+				protocol: config.protocol as Protocol | undefined,
+				url: config.url,
+				model: config.model,
+				apiKey: config.apiKey,
+			};
+		}
+	} catch (err) {
+		// Silently ignore load errors - will use environment/defaults
+	}
+}
+
+/** Save current config to JSON file */
+function saveConfig(): void {
+	try {
+		fs.writeFileSync(
+			CONFIG_PATH,
+			JSON.stringify(
+				{
+					protocol: runtimeConfig.protocol,
+					url: runtimeConfig.url,
+					model: runtimeConfig.model,
+					apiKey: runtimeConfig.apiKey,
+				},
+				null,
+				2,
+			),
+		);
+	} catch (err) {
+		// Silently ignore save errors
+	}
+}
+
+// Load saved config on startup
+loadConfig();
 
 function getProtocol(): Protocol {
 	if (runtimeConfig.protocol) return runtimeConfig.protocol;
@@ -561,24 +609,28 @@ export default function (pi: ExtensionAPI) {
 					// Reset URL and model so they pick up the new protocol defaults
 					runtimeConfig.url = undefined;
 					runtimeConfig.model = undefined;
+					saveConfig();
 					ctx.ui.notify(`Protocol set to ${choice}`, "info");
 				}
 			} else if (action.startsWith("URL:")) {
 				const url = await ctx.ui.input("WebSocket URL", getBaseUrl(getProtocol()));
 				if (url) {
 					runtimeConfig.url = url;
+					saveConfig();
 					ctx.ui.notify(`URL set to ${url}`, "info");
 				}
 			} else if (action.startsWith("Model:")) {
 				const model = await ctx.ui.input("Model name", getModel(getProtocol()));
 				if (model) {
 					runtimeConfig.model = model;
+					saveConfig();
 					ctx.ui.notify(`Model set to ${model}`, "info");
 				}
 			} else if (action.startsWith("API Key:")) {
 				const key = await ctx.ui.input("API Key");
 				if (key) {
 					runtimeConfig.apiKey = key;
+					saveConfig();
 					ctx.ui.notify("API key updated", "info");
 				}
 			} else if (action === "Reset to defaults") {
@@ -586,6 +638,7 @@ export default function (pi: ExtensionAPI) {
 				runtimeConfig.url = undefined;
 				runtimeConfig.model = undefined;
 				runtimeConfig.apiKey = undefined;
+				saveConfig();
 				ctx.ui.notify("Voice config reset to environment/defaults", "info");
 			}
 		},
