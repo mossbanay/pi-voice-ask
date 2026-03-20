@@ -1,6 +1,0 @@
-[submodule "externals/pi-mono"]
-	path = externals/pi-mono
-	url = git@github.com:badlogic/pi-mono.git
-[submodule "externals/client-ts"]
-	path = externals/client-ts
-	url = git@github.com:mistralai/client-ts.git

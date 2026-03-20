@@ -2,5 +2,13 @@
     "name": "pi-voice-ask",
     "pi": {
         "extensions": ["voice.ts"]
+    },
+    "dependencies": {
+        "ws": "^8.0.0",
+        "yargs": "^17.0.0"
+    },
+    "devDependencies": {
+        "@types/ws": "^8.0.0",
+        "@types/yargs": "^17.0.0"
     }
 }
