@@ -16,11 +16,10 @@
  * - A running Voxtral-compatible WebSocket server (vLLM) or Mistral API access
  *
  * Environment variables:
- * - VOICE_PROTOCOL  - "vllm" (default) or "mistral"
- * - VOXTRAL_URL     - WebSocket URL (default: ws://localhost:8000/v1/realtime)
- * - VOXTRAL_MODEL   - Model name (default per protocol)
- * - MISTRAL_API_KEY  - API key (required for Mistral protocol)
- * - VOICE_SAMPLE_RATE - Sample rate in Hz (default: 16000)
+ * - VOICE_PROTOCOL - "vllm" (default) or "mistral"
+ * - VOXTRAL_URL - WebSocket URL (default: ws://localhost:8000/v1/realtime)
+ * - VOXTRAL_MODEL - Model name (default per protocol)
+ * - MISTRAL_API_KEY - API key (required for Mistral protocol)
  *
  * Commands:
  * - /voice-check - Verify all dependencies are available
@@ -34,6 +33,7 @@ import WsWebSocket from "ws";
 
 const TRIGGER_PHRASE = "send reply";
 const AUDIO_CHUNK_SIZE = 4096; // bytes per WebSocket audio message
+const SAMPLE_RATE = 16000;
 
 type Protocol = "vllm" | "mistral";
 
@@ -74,7 +74,6 @@ const runtimeConfig: {
 	url?: string;
 	model?: string;
 	apiKey?: string;
-	sampleRate?: number;
 } = {};
 
 function getProtocol(): Protocol {
@@ -90,12 +89,6 @@ function getBaseUrl(protocol: Protocol): string {
 
 function getModel(protocol: Protocol): string {
 	return runtimeConfig.model || process.env.VOXTRAL_MODEL || protocolConfig[protocol].defaultModel;
-}
-
-function getSampleRate(): number {
-	if (runtimeConfig.sampleRate) return runtimeConfig.sampleRate;
-	const rate = process.env.VOICE_SAMPLE_RATE;
-	return rate ? parseInt(rate, 10) : 16000;
 }
 
 function getApiKey(): string | undefined {
@@ -151,7 +144,7 @@ function createWebSocket(protocol: Protocol, url: string): WebSocket {
 	return new WebSocket(url);
 }
 
-function sendSessionSetup(ws: WebSocket, protocol: Protocol, model: string, sampleRate: number): void {
+function sendSessionSetup(ws: WebSocket, protocol: Protocol, model: string): void {
 	if (protocol === "vllm") {
 		ws.send(JSON.stringify({ type: "session.update", model }));
 		ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
@@ -161,7 +154,7 @@ function sendSessionSetup(ws: WebSocket, protocol: Protocol, model: string, samp
 			session: {
 				audio_format: {
 					encoding: "pcm_s16le",
-					sample_rate: sampleRate,
+					sample_rate: SAMPLE_RATE,
 				},
 			},
 		}));
@@ -230,7 +223,7 @@ export default function (pi: ExtensionAPI) {
 
 				const proto = protocolConfig[protocol];
 				const model = getModel(protocol);
-				const sampleRate = getSampleRate();
+				const sampleRate = SAMPLE_RATE;
 				const baseUrl = getBaseUrl(protocol);
 				const wsUrl = buildWsUrl(protocol, baseUrl, model);
 
@@ -319,7 +312,7 @@ export default function (pi: ExtensionAPI) {
 						}
 
 						if (data.type === "session.created") {
-							sendSessionSetup(ws!, protocol, model, sampleRate);
+							sendSessionSetup(ws!, protocol, model);
 							startRecording();
 							return;
 						}
@@ -372,7 +365,7 @@ export default function (pi: ExtensionAPI) {
 					recProcess = spawn("rec", [
 						"-q",
 						"-t", "raw",
-						"-r", String(sampleRate),
+						"-r", String(SAMPLE_RATE),
 						"-e", "signed-integer",
 						"-b", "16",
 						"-c", "1",
@@ -593,7 +586,6 @@ export default function (pi: ExtensionAPI) {
 				runtimeConfig.url = undefined;
 				runtimeConfig.model = undefined;
 				runtimeConfig.apiKey = undefined;
-				runtimeConfig.sampleRate = undefined;
 				ctx.ui.notify("Voice config reset to environment/defaults", "info");
 			}
 		},
