@@ -5,18 +5,22 @@
  * - Registers a `voice_ask` tool for the LLM to ask the user questions via voice
  * - Uses macOS `say` for text-to-speech
  * - Uses `rec` (sox) to capture microphone audio as raw PCM16 @ 16kHz
- * - Streams audio to a Voxtral WebSocket server for real-time transcription
+ * - Streams audio to a realtime WebSocket server for transcription
+ * - Supports both vLLM and Mistral protocols
  * - Detects "send reply" keyword in the live transcription stream to stop listening
  * - Enter key works as a manual stop fallback
  *
  * Requirements:
  * - macOS (for `say` command)
  * - sox (`brew install sox`)
- * - A running Voxtral-compatible WebSocket server
+ * - A running Voxtral-compatible WebSocket server (vLLM) or Mistral API access
  *
  * Environment variables:
- * - VOXTRAL_URL  - WebSocket URL (default: ws://localhost:8000/v1/realtime)
- * - VOXTRAL_MODEL - Model name to send in session.update (default: voxtral-mini-latest)
+ * - VOICE_PROTOCOL  - "vllm" (default) or "mistral"
+ * - VOXTRAL_URL     - WebSocket URL (default: ws://localhost:8000/v1/realtime)
+ * - VOXTRAL_MODEL   - Model name (default per protocol)
+ * - MISTRAL_API_KEY  - API key (required for Mistral protocol)
+ * - VOICE_SAMPLE_RATE - Sample rate in Hz (default: 16000)
  *
  * Commands:
  * - /voice-check - Verify all dependencies are available
@@ -26,9 +30,30 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { type ChildProcess, execSync, spawn } from "node:child_process";
+import WsWebSocket from "ws";
 
 const TRIGGER_PHRASE = "send reply";
 const AUDIO_CHUNK_SIZE = 4096; // bytes per WebSocket audio message
+
+type Protocol = "vllm" | "mistral";
+
+const protocolConfig = {
+	vllm: {
+		appendType: "input_audio_buffer.append",
+		commitType: "input_audio_buffer.commit",
+		deltaEvent: "transcription.delta",
+		deltaField: "delta",
+		defaultModel: "voxtral-mini-latest",
+		defaultUrl: "ws://localhost:8000/v1/realtime",
+	},
+	mistral: {
+		appendType: "input_audio.append",
+		deltaEvent: "transcription.text.delta",
+		deltaField: "text",
+		defaultModel: "voxtral-mini-transcribe-realtime-2602",
+		defaultUrl: "wss://api.mistral.ai",
+	},
+} as const;
 
 interface VoiceDetails {
 	question: string;
@@ -43,12 +68,46 @@ const VoiceAskParams = Type.Object({
 	),
 });
 
-function getVoxtralUrl(): string {
-	return process.env.VOXTRAL_URL || "ws://localhost:8000/v1/realtime";
+// Runtime config — overrides environment variables when set
+const runtimeConfig: {
+	protocol?: Protocol;
+	url?: string;
+	model?: string;
+	apiKey?: string;
+	sampleRate?: number;
+} = {};
+
+function getProtocol(): Protocol {
+	if (runtimeConfig.protocol) return runtimeConfig.protocol;
+	const p = process.env.VOICE_PROTOCOL?.toLowerCase();
+	if (p === "mistral") return "mistral";
+	return "vllm";
 }
 
-function getVoxtralModel(): string {
-	return process.env.VOXTRAL_MODEL || "voxtral-mini-latest";
+function getBaseUrl(protocol: Protocol): string {
+	return runtimeConfig.url || process.env.VOXTRAL_URL || protocolConfig[protocol].defaultUrl;
+}
+
+function getModel(protocol: Protocol): string {
+	return runtimeConfig.model || process.env.VOXTRAL_MODEL || protocolConfig[protocol].defaultModel;
+}
+
+function getSampleRate(): number {
+	if (runtimeConfig.sampleRate) return runtimeConfig.sampleRate;
+	const rate = process.env.VOICE_SAMPLE_RATE;
+	return rate ? parseInt(rate, 10) : 16000;
+}
+
+function getApiKey(): string | undefined {
+	return runtimeConfig.apiKey || process.env.MISTRAL_API_KEY;
+}
+
+function buildWsUrl(protocol: Protocol, baseUrl: string, model: string): string {
+	if (protocol === "mistral") {
+		const base = baseUrl.replace(/\/$/, "");
+		return `${base}/v1/audio/transcriptions/realtime?model=${encodeURIComponent(model)}`;
+	}
+	return baseUrl;
 }
 
 function checkDependency(cmd: string): boolean {
@@ -80,6 +139,42 @@ function hasTriggerPhrase(text: string): boolean {
 /** Strip trigger phrase from end of transcript */
 function stripTriggerPhrase(text: string): string {
 	return text.replace(new RegExp(`\\b${TRIGGER_PHRASE}[.!?,]*\\s*$`, "i"), "").trim();
+}
+
+function createWebSocket(protocol: Protocol, url: string): WebSocket {
+	if (protocol === "mistral") {
+		const apiKey = getApiKey();
+		return new WsWebSocket(url, {
+			headers: { Authorization: `Bearer ${apiKey}` },
+		}) as unknown as WebSocket;
+	}
+	return new WebSocket(url);
+}
+
+function sendSessionSetup(ws: WebSocket, protocol: Protocol, model: string, sampleRate: number): void {
+	if (protocol === "vllm") {
+		ws.send(JSON.stringify({ type: "session.update", model }));
+		ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+	} else {
+		ws.send(JSON.stringify({
+			type: "session.update",
+			session: {
+				audio_format: {
+					encoding: "pcm_s16le",
+					sample_rate: sampleRate,
+				},
+			},
+		}));
+	}
+}
+
+function sendFinalCommit(ws: WebSocket, protocol: Protocol): void {
+	if (ws.readyState !== WebSocket.OPEN) return;
+	if (protocol === "vllm") {
+		ws.send(JSON.stringify({ type: "input_audio_buffer.commit", final: true }));
+	} else {
+		ws.send(JSON.stringify({ type: "input_audio.end" }));
+	}
 }
 
 export default function (pi: ExtensionAPI) {
@@ -114,6 +209,14 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			const protocol = getProtocol();
+			if (protocol === "mistral" && !getApiKey()) {
+				return {
+					content: [{ type: "text", text: "Error: MISTRAL_API_KEY is required for Mistral protocol. Set it in your environment." }],
+					details: { question: params.question, answer: null } as VoiceDetails,
+				};
+			}
+
 			const result = await ctx.ui.custom<{ answer: string } | null>((tui, theme, _kb, done) => {
 				let state: "speaking" | "connecting" | "listening" | "error" = "speaking";
 				let transcript = "";
@@ -124,6 +227,12 @@ export default function (pi: ExtensionAPI) {
 				let cachedLines: string[] | undefined;
 				let aborted = false;
 				let finished = false;
+
+				const proto = protocolConfig[protocol];
+				const model = getModel(protocol);
+				const sampleRate = getSampleRate();
+				const baseUrl = getBaseUrl(protocol);
+				const wsUrl = buildWsUrl(protocol, baseUrl, model);
 
 				function refresh() {
 					cachedLines = undefined;
@@ -172,11 +281,8 @@ export default function (pi: ExtensionAPI) {
 				function connectAndStream() {
 					if (aborted) return;
 
-					const url = getVoxtralUrl();
-					const model = getVoxtralModel();
-
 					try {
-						ws = new WebSocket(url);
+						ws = createWebSocket(protocol, wsUrl);
 					} catch (err: any) {
 						state = "error";
 						errorMessage = `WebSocket creation failed: ${err.message}`;
@@ -186,68 +292,12 @@ export default function (pi: ExtensionAPI) {
 
 					ws.onopen = () => {
 						if (aborted) return;
-
-						// Configure the model
-						ws!.send(JSON.stringify({ type: "session.update", model }));
-
-						// Signal start of audio stream
-						ws!.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-
-						// Start recording: raw PCM16, 16kHz, mono, to stdout
-						recProcess = spawn("rec", [
-							"-q", // quiet
-							"-t",
-							"raw", // raw output
-							"-r",
-							"16000", // 16kHz
-							"-e",
-							"signed-integer",
-							"-b",
-							"16", // 16-bit
-							"-c",
-							"1", // mono
-							"-", // stdout
-						]);
-
-						state = "listening";
-						refresh();
-
-						recProcess.stdout?.on("data", (data: Buffer) => {
-							if (aborted || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-							// Stream audio in AUDIO_CHUNK_SIZE byte chunks
-							for (let i = 0; i < data.length; i += AUDIO_CHUNK_SIZE) {
-								const chunk = data.subarray(i, i + AUDIO_CHUNK_SIZE);
-								ws.send(
-									JSON.stringify({
-										type: "input_audio_buffer.append",
-										audio: Buffer.from(chunk).toString("base64"),
-									}),
-								);
-							}
-						});
-
-						recProcess.on("error", (err) => {
-							if (aborted) return;
-							state = "error";
-							errorMessage = `Recording failed: ${err.message}`;
-							refresh();
-						});
-
-						recProcess.on("close", () => {
-							// rec stopped (killed or error) - signal end of audio
-							if (ws && ws.readyState === WebSocket.OPEN) {
-								ws.send(
-									JSON.stringify({ type: "input_audio_buffer.commit", final: true }),
-								);
-							}
-						});
+						// Wait for session.created before sending setup
 					};
 
 					ws.onmessage = (event) => {
 						if (aborted) return;
 
-						// Handle both string and Buffer data (Node.js WebSocket sends Buffers)
 						let raw: string;
 						if (typeof event.data === "string") {
 							raw = event.data;
@@ -256,7 +306,6 @@ export default function (pi: ExtensionAPI) {
 						} else if (event.data instanceof ArrayBuffer) {
 							raw = new TextDecoder().decode(event.data);
 						} else {
-							// Blob or other - try toString
 							raw = String(event.data);
 						}
 
@@ -269,11 +318,17 @@ export default function (pi: ExtensionAPI) {
 							return;
 						}
 
-						lastServerMsg = `${data.type}${data.delta ? `: "${data.delta}"` : ""}`;
+						if (data.type === "session.created") {
+							sendSessionSetup(ws!, protocol, model, sampleRate);
+							startRecording();
+							return;
+						}
+
+						lastServerMsg = `${data.type}${data[proto.deltaField] ? `: "${data[proto.deltaField]}"` : ""}`;
 						refresh();
 
-						if (data.type === "transcription.delta") {
-							transcript += data.delta;
+						if (data.type === proto.deltaEvent) {
+							transcript += data[proto.deltaField];
 							refresh();
 
 							// Check for trigger phrase in real-time
@@ -289,15 +344,15 @@ export default function (pi: ExtensionAPI) {
 							}
 						} else if (data.type === "error") {
 							state = "error";
-							errorMessage = `Voxtral error: ${data.message || JSON.stringify(data)}`;
+							errorMessage = `Server error: ${data.error?.message ?? data.message ?? JSON.stringify(data)}`;
 							refresh();
 						}
 					};
 
-					ws.onerror = (event) => {
+					ws.onerror = () => {
 						if (aborted || finished) return;
 						state = "error";
-						errorMessage = `WebSocket error connecting to ${url}`;
+						errorMessage = `WebSocket error connecting to ${wsUrl}`;
 						refresh();
 					};
 
@@ -309,6 +364,51 @@ export default function (pi: ExtensionAPI) {
 							finish({ answer: cleaned });
 						}
 					};
+				}
+
+				function startRecording() {
+					if (aborted || !ws) return;
+
+					recProcess = spawn("rec", [
+						"-q",
+						"-t", "raw",
+						"-r", String(sampleRate),
+						"-e", "signed-integer",
+						"-b", "16",
+						"-c", "1",
+						"-",
+					]);
+
+					state = "listening";
+					refresh();
+
+					recProcess.stdout?.on("data", (data: Buffer) => {
+						if (aborted || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+						for (let i = 0; i < data.length; i += AUDIO_CHUNK_SIZE) {
+							const chunk = data.subarray(i, i + AUDIO_CHUNK_SIZE);
+							ws.send(
+								JSON.stringify({
+									type: proto.appendType,
+									audio: Buffer.from(chunk).toString("base64"),
+								}),
+							);
+						}
+					});
+
+					recProcess.on("error", (err) => {
+						if (aborted) return;
+						state = "error";
+						errorMessage = `Recording failed: ${err.message}`;
+						refresh();
+					});
+
+					recProcess.on("close", () => {
+						// rec stopped - signal end of audio
+						if (ws && ws.readyState === WebSocket.OPEN) {
+							sendFinalCommit(ws, protocol);
+						}
+					});
 				}
 
 				function stopAndFinish() {
@@ -350,6 +450,7 @@ export default function (pi: ExtensionAPI) {
 					add(theme.fg("text", " Voice Ask"));
 					add("");
 					add(theme.fg("muted", ` Q: ${params.question}`));
+					add(theme.fg("dim", ` [${protocol}] ${getModel(protocol)}`));
 					add("");
 
 					switch (state) {
@@ -357,7 +458,7 @@ export default function (pi: ExtensionAPI) {
 							add(theme.fg("accent", " Speaking..."));
 							break;
 						case "connecting":
-							add(theme.fg("warning", " Connecting to Voxtral..."));
+							add(theme.fg("warning", ` Connecting to ${protocol === "mistral" ? "Mistral" : "Voxtral"}...`));
 							break;
 						case "listening": {
 							add(theme.fg("success", " Listening..."));
@@ -444,17 +545,84 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("voice-check", {
-		description: "Check if voice dependencies (say, rec, Voxtral server) are available",
+	pi.registerCommand("voice-config", {
+		description: "Configure voice extension settings (protocol, URL, model, API key)",
 		handler: async (_args, ctx) => {
+			const protocol = getProtocol();
+			const options = [
+				`Protocol: ${protocol}`,
+				`URL: ${getBaseUrl(protocol)}`,
+				`Model: ${getModel(protocol)}`,
+				`API Key: ${getApiKey() ? "***set***" : "(not set)"}`,
+				"Reset to defaults",
+			];
+
+			const action = await ctx.ui.select("Voice Config", options);
+			if (!action) return;
+
+			if (action.startsWith("Protocol:")) {
+				const choices = ["vllm", "mistral"];
+				const choice = await ctx.ui.select("Select protocol", choices);
+				if (choice === "vllm" || choice === "mistral") {
+					runtimeConfig.protocol = choice;
+					// Reset URL and model so they pick up the new protocol defaults
+					runtimeConfig.url = undefined;
+					runtimeConfig.model = undefined;
+					ctx.ui.notify(`Protocol set to ${choice}`, "info");
+				}
+			} else if (action.startsWith("URL:")) {
+				const url = await ctx.ui.input("WebSocket URL", getBaseUrl(getProtocol()));
+				if (url) {
+					runtimeConfig.url = url;
+					ctx.ui.notify(`URL set to ${url}`, "info");
+				}
+			} else if (action.startsWith("Model:")) {
+				const model = await ctx.ui.input("Model name", getModel(getProtocol()));
+				if (model) {
+					runtimeConfig.model = model;
+					ctx.ui.notify(`Model set to ${model}`, "info");
+				}
+			} else if (action.startsWith("API Key:")) {
+				const key = await ctx.ui.input("API Key");
+				if (key) {
+					runtimeConfig.apiKey = key;
+					ctx.ui.notify("API key updated", "info");
+				}
+			} else if (action === "Reset to defaults") {
+				runtimeConfig.protocol = undefined;
+				runtimeConfig.url = undefined;
+				runtimeConfig.model = undefined;
+				runtimeConfig.apiKey = undefined;
+				runtimeConfig.sampleRate = undefined;
+				ctx.ui.notify("Voice config reset to environment/defaults", "info");
+			}
+		},
+	});
+
+	pi.registerCommand("voice-check", {
+		description: "Check if voice dependencies (say, rec, transcription server) are available",
+		handler: async (_args, ctx) => {
+			const protocol = getProtocol();
 			const hasSay = checkDependency("say");
 			const hasRec = checkDependency("rec");
-			const voxtralUrl = getVoxtralUrl();
+			const baseUrl = getBaseUrl(protocol);
+			const model = getModel(protocol);
+			const hasKey = protocol === "mistral" ? !!getApiKey() : true;
 
 			const ok = (v: boolean) => (v ? "ok" : "MISSING");
-			const parts = [`say=${ok(hasSay)}`, `rec=${ok(hasRec)}`, `voxtral=${voxtralUrl}`];
+			const parts = [
+				`protocol=${protocol}`,
+				`say=${ok(hasSay)}`,
+				`rec=${ok(hasRec)}`,
+				`model=${model}`,
+				`url=${baseUrl}`,
+			];
+			if (protocol === "mistral") {
+				parts.push(`api-key=${ok(hasKey)}`);
+			}
 
-			ctx.ui.notify(`Voice check: ${parts.join(", ")}`, hasSay && hasRec ? "info" : "error");
+			const allOk = hasSay && hasRec && hasKey;
+			ctx.ui.notify(`Voice check: ${parts.join(", ")}`, allOk ? "info" : "error");
 		},
 	});
 }

@@ -8,19 +8,98 @@
 pi install git:github.com/mossbanay/pi-voice-ask
 ```
 
+### Requirements
+
+- **macOS** (uses the `say` command for text-to-speech)
+- **SoX** for microphone capture: `brew install sox`
+- A realtime transcription server — either a local [vLLM](https://docs.vllm.ai/) instance or a [Mistral API](https://docs.mistral.ai/) key
+
 ## What is this?
 
 This is a minimal extension for [Pi](https://pi.dev/) which adds support for the agent to invoke a tool to ask you a question via TTS using macOS `say` and listens for your reply using [Voxtral realtime](https://mistral.ai/news/voxtral-transcribe-2) from Mistral, my favourite speech to text model. When the phrase "send reply" is transcribed your response is flushed back to the agent and it can continue working.
 
-Here's the prompt I used to build it:
+Supports two transcription backends:
 
-```text
-I want to write a new plugin for Pi which allows me to speak to it.
-There should be a tool that the agent is able to call to ask me a question.
-When it calls that tool, it should run text-to-speech to convert the question
-into audio, play it and then listen to my response and wait for a keyword
-(e.g. send reply) to indicate that I'm finished and send it back to the agent.
+- **vLLM** — a local Voxtral server (default)
+- **Mistral** — the Mistral cloud API with authentication
+
+## Configuration
+
+Configuration can be set via environment variables or changed at runtime using the `/voice-config` command inside Pi.
+
+### Environment variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `VOICE_PROTOCOL` | `"vllm"` or `"mistral"` | `vllm` |
+| `VOXTRAL_URL` | WebSocket URL for the transcription server | `ws://localhost:8000/v1/realtime` (vLLM) or `wss://api.mistral.ai` (Mistral) |
+| `VOXTRAL_MODEL` | Model name | `voxtral-mini-latest` (vLLM) or `voxtral-mini-transcribe-realtime-2602` (Mistral) |
+| `MISTRAL_API_KEY` | API key (required for Mistral protocol) | — |
+| `VOICE_SAMPLE_RATE` | Audio sample rate in Hz | `16000` |
+
+### Runtime configuration
+
+Use `/voice-config` inside Pi to interactively change the protocol, URL, model, or API key without restarting. Runtime settings override environment variables and can be reset back to defaults.
+
+### Example: local vLLM server
+
+```bash
+# Start a vLLM server with Voxtral
+vllm serve mistralai/Voxtral-Mini-3B-2507 --port 8000
+
+# No extra config needed — vLLM is the default protocol
+pi
 ```
 
-I have not reviewed the code that was produced, but I have happily used it to code while making pizza dough.
+### Example: Mistral cloud API
 
+```bash
+export VOICE_PROTOCOL=mistral
+export MISTRAL_API_KEY=your-api-key-here
+pi
+```
+
+Or configure at runtime:
+
+```
+/voice-config
+# → Select "Protocol: vllm" → choose "mistral"
+# → Select "API Key: (not set)" → enter your key
+```
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `/voice-config` | Interactively configure protocol, URL, model, and API key |
+| `/voice-check` | Verify that all dependencies (`say`, `rec`, server) are available |
+
+## How it works
+
+1. The agent calls the `voice_ask` tool with a question
+2. The question is spoken aloud using macOS `say`
+3. A WebSocket connection is opened to the transcription server
+4. Your microphone audio is captured via SoX (`rec`) and streamed as base64-encoded PCM16 chunks
+5. Transcription deltas are displayed in real-time
+6. Say **"send reply"** to finish, press **Enter** to send immediately, or **Esc** to cancel
+7. The transcribed response is returned to the agent
+
+## Standalone microphone script
+
+The repository also includes `realtime_microphone.ts`, a standalone script for testing your transcription server directly:
+
+```bash
+# vLLM
+npx tsx realtime_microphone.ts --base-url ws://localhost:8005/v1/realtime
+
+# Mistral
+npx tsx realtime_microphone.ts --protocol mistral --base-url wss://api.mistral.ai --api-key $MISTRAL_API_KEY
+```
+
+## Origin story
+
+Here's the prompt used to build the original version:
+
+> I want to write a new plugin for Pi which allows me to speak to it. There should be a tool that the agent is able to call to ask me a question. When it calls that tool, it should run text-to-speech to convert the question into audio, play it and then listen to my response and wait for a keyword (e.g. send reply) to indicate that I'm finished and send it back to the agent.
+
+I have not reviewed the code that was produced, but I have happily used it to code while making pizza dough.
