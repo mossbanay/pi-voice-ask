@@ -1,3 +1,0 @@
-[submodule "externals/pi-mono"]
-	path = externals/pi-mono
-	url = git@github.com:badlogic/pi-mono.git
