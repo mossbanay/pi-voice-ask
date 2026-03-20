@@ -8,11 +8,22 @@
 pi install git:github.com/mossbanay/pi-voice-ask
 ```
 
-### Requirements
+## Quickstart (Mistral cloud)
 
-- **macOS** (uses the `say` command for text-to-speech)
-- **SoX** for microphone capture: `brew install sox`
-- A realtime transcription server — either a local [vLLM](https://docs.vllm.ai/) instance or a [Mistral API](https://docs.mistral.ai/) key
+```bash
+export MISTRAL_API_KEY=your-api-key-here
+pi install git:github.com/mossbanay/pi-voice-ask
+```
+
+Or for a local vLLM server:
+
+```bash
+export VOICE_PROTOCOL=vllm
+export VOXTRAL_URL=ws://localhost:8000/v1/realtime
+pi install git:github.com/mossbanay/pi-voice-ask
+```
+
+Note: Settings configured via `/voice-config` are persisted to `~/.pi-voice-config.json`.
 
 ## What is this?
 
@@ -31,9 +42,9 @@ Configuration can be set via environment variables or changed at runtime using t
 
 | Variable | Description | Default |
 |---|---|---|
-| `VOICE_PROTOCOL` | `"vllm"` or `"mistral"` | `vllm` |
-| `VOXTRAL_URL` | WebSocket URL for the transcription server | `ws://localhost:8000/v1/realtime` (vLLM) or `wss://api.mistral.ai` (Mistral) |
-| `VOXTRAL_MODEL` | Model name | `voxtral-mini-latest` (vLLM) or `voxtral-mini-transcribe-realtime-2602` (Mistral) |
+| `VOICE_PROTOCOL` | `"vllm"` or `"mistral"` | `mistral` |
+| `VOXTRAL_URL` | WebSocket URL for the transcription server | `wss://api.mistral.ai` (Mistral) or `ws://localhost:8000/v1/realtime` (vLLM) |
+| `VOXTRAL_MODEL` | Model name | `voxtral-mini-transcribe-realtime-2602` (Mistral) or `voxtral-mini-latest` (vLLM) |
 | `MISTRAL_API_KEY` | API key (required for Mistral protocol) | — |
 
 ### Runtime configuration

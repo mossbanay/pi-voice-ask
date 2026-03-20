@@ -127,8 +127,8 @@ loadConfig();
 function getProtocol(): Protocol {
 	if (runtimeConfig.protocol) return runtimeConfig.protocol;
 	const p = process.env.VOICE_PROTOCOL?.toLowerCase();
-	if (p === "mistral") return "mistral";
-	return "vllm";
+	if (p === "vllm") return "vllm";
+	return "mistral";
 }
 
 function getBaseUrl(protocol: Protocol): string {
