@@ -1,5 +1,6 @@
 {
     "name": "pi-voice-ask",
+    "license": "MIT",
     "pi": {
         "extensions": ["voice.ts"]
     },
